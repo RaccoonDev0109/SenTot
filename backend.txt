@@ -1,0 +1,621 @@
+## SenTot – Website Backend Spec (Standalone)
+
+Tài liệu này là **đặc tả backend độc lập** để triển khai **Website Backend** cho dự án SenTot.  
+Chỉ làm **Backend** (API + DB + Auth + vận hành). **Không làm AI**.
+
+---
+
+## 1) Mục tiêu & nguyên tắc
+
+- **Mục tiêu**: cung cấp hệ thống backend “vững” cho website quản lý thú cưng + danh bạ phòng khám + đặt lịch + thông báo + nội dung cơ bản.
+- **Ưu tiên**:
+  - dữ liệu bền vững (PostgreSQL), migration rõ ràng
+  - phân quyền & bảo mật đúng chuẩn (JWT/RBAC)
+  - API rõ ràng, dễ mở rộng, có tài liệu (OpenAPI)
+  - logging/audit tối thiểu để vận hành thật
+- **Ngoài phạm vi**: AI/chat bot, phân tích AI, LLM, v.v.
+
+### Những gì dự án đang có (để bám sát domain)
+
+Trong dữ liệu/types hiện tại, các thực thể cốt lõi đã xuất hiện và cần “làm thật” ở backend:
+- **User**: `id`, `fullName`, `email`, `phone`, `avatar`, `createdAt`
+- **Pet**: `id`, `ownerId`, `name`, `species`, `breed`, `gender`, `birthDate`, `weight`, `avatar`, `description?`
+- **Vaccination**: `id`, `petId`, `vaccineName`, `date`, `nextDueDate`, `status`, `notes?`
+- **Clinic**: `id`, `name`, `address`, `phone`, `description`, `rating`, `reviewCount`, `openHours`, `image`, `services[]`, `lat/lng?`
+- **Appointment**: `id`, `petId`, `clinicId`, `dateTime`, `status`, `notes?` (+ `petName/clinicName` chỉ là hiển thị)
+
+---
+
+## 2) Tech stack (đề xuất)
+
+🔥 1. Runtime & Framework  
+**Node.js**  
+👉 môi trường chạy backend  
+**Express.js**  
+👉 framework nhẹ, dễ build API nhanh  
+
+🧠 2. Database  
+**PostgreSQL**  
+👉 database chính (relational, phù hợp schema)  
+**Supabase (optional nhưng nên dùng)**  
+👉 quản lý PostgreSQL + dashboard + auth nhanh (nếu muốn)  
+
+⚙️ 3. ORM / Query  
+**Prisma (khuyên dùng)**  
+👉 dễ viết, có type, dev nhanh  
+
+🔐 4. Authentication  
+**JWT (JSON Web Token)**  
+👉 login / session  
+(hoặc nếu dùng Supabase → có sẵn auth, backend chỉ cần verify token)  
+
+📡 5. API  
+**REST API**  
+Ví dụ:  
+- `GET /pets`  
+- `POST /appointments`  
+
+📁 6. Storage (ảnh thú cưng / phòng khám)  
+**Cloudinary**  
+👉 upload ảnh nhanh, dễ demo & vận hành  
+
+🔔 7. Notification (optional)  
+**Firebase Cloud Messaging (FCM)**  
+👉 push notification  
+
+Khuyến nghị bổ sung (để “vững”):
+- **TypeScript** (bắt buộc)
+- **Zod** (validate request)
+- **Helmet**, **CORS**, **Rate limit**
+- **Pino** (logging)
+- **Swagger/OpenAPI** (docs)
+- **Jest/Vitest** (test tối thiểu cho auth & booking rules)
+
+---
+
+## 3) Actors (đối tượng sử dụng)
+
+- **Guest**: xem danh bạ phòng khám, nội dung (FAQ/articles/promotions), đăng ký/đăng nhập.
+- **Customer / Pet Owner**: quản lý thú cưng, tiêm phòng, đặt lịch, xem lịch hẹn, nhận thông báo, cài đặt.
+- **Clinic Staff**: quản lý thông tin clinic, working hours, xử lý lịch hẹn.
+- **Admin**: quản lý user/role, duyệt clinic, quản trị nội dung.
+- **System**: job/cron cho reminders, notifications, audit.
+
+---
+
+## 4) Domain & Entities (mức backend)
+
+Các entity chi tiết đã được chuẩn hoá trong `db.txt`. Backend cần tối thiểu các nhóm:
+
+- **Identity**: User, Role, UserRole, RefreshToken (hoặc session)
+- **Pets**: Pet, Vaccination, PetWeightRecord (optional nhưng nên có)
+- **Clinics**: Clinic, ClinicService, ClinicWorkingHours, ClinicGalleryImage (optional)
+- **Appointments**: Appointment (+ status flow, anti double booking)
+- **Notifications**: Notification, UserSettings
+- **Content**: FaqItem, ContentArticle, Promotion (optional)
+- **System**: FileAsset, AuditLog
+
+---
+
+## 5) Use cases / Chức năng Backend bắt buộc (không AI)
+
+### 5.1 Auth & User
+
+- **Auth**
+  - Register (hash password, validate unique email/phone)
+  - Login (issue access token + refresh token)
+  - Refresh token (rotate, revoke)
+  - Logout (revoke refresh token)
+  - Forgot/Reset password (optional giai đoạn 2)
+- **User profile**
+  - Get profile, update profile
+  - Change password
+  - Upload avatar (Cloudinary) (optional)
+- **RBAC**
+  - Roles: `customer`, `clinic_staff`, `admin`
+  - Middleware: `requireAuth`, `requireRole`
+- **Admin user management**
+  - List/search users, lock/unlock, set roles
+
+#### Quy tắc nghiệp vụ (Auth/User)
+
+- **Unique**: `email`, `phone` không trùng.
+- **Login**: cho phép đăng nhập bằng `email` (và có thể mở rộng thêm `phone`).
+- **User status**: `locked` → chặn login và mọi API cần auth.
+- **Token**:
+  - access token TTL ngắn (vd 15 phút)
+  - refresh token TTL dài (vd 30 ngày) + rotation
+  - logout → revoke refresh token
+- **Audit**: log các hành động nhạy cảm: login fail nhiều lần, lock/unlock user, đổi role, đổi status appointment.
+
+### 5.2 Pets
+
+- CRUD pets (owner scope)
+- Upload pet photo (Cloudinary) (optional)
+- Vaccinations
+  - CRUD vaccination record
+  - logic status `completed/upcoming/overdue` (dựa trên ngày)
+  - reminder khi sắp đến hạn (cron → notification)
+- Pet weight records (để chart) (optional nhưng nên có)
+
+#### Quy tắc nghiệp vụ (Pets/Vaccinations)
+
+- **Ownership**: chỉ owner (customer) được CRUD pet/vaccination của pet đó; staff/admin chỉ đọc theo quyền được cấp.
+- **Pet species/gender**: dùng enum như types hiện tại:
+  - species: `dog|cat|bird|rabbit|other`
+  - gender: `male|female`
+- **Avatar pet**:
+  - giai đoạn đầu có thể dùng `avatar_key` (vd `milo`, `luna`) để map ảnh sẵn
+  - giai đoạn sau chuyển sang `avatar_url` (Cloudinary) + `file_assets`
+- **Vaccination status**:
+  - `completed` nếu `date <= today`
+  - `upcoming` nếu `date > today` và chưa quá hạn
+  - `overdue` nếu `nextDueDate < today`
+  - nên ưu tiên tính toán theo ngày trong backend để đồng nhất, thay vì client tự suy diễn
+- **Reminders**:
+  - job daily: nhắc vaccine sắp đến hạn (vd trước 7 ngày/1 ngày) + tạo `notifications`
+
+### 5.3 Clinics (Directory)
+
+- Public clinics
+  - list + pagination
+  - search theo name/address/service
+  - filter theo service/category
+  - detail clinic
+- Clinic management (clinic_staff/admin)
+  - update info
+  - manage services
+  - manage working hours
+  - manage gallery images (optional)
+- Reviews (optional)
+  - create review chỉ khi appointment completed
+  - moderation (admin) (optional)
+
+#### Quy tắc nghiệp vụ (Clinics)
+
+- **Search**: tối thiểu search `name`, `address`, và “dịch vụ” (services).
+- **Filter**:
+  - theo `service` (vd: “Tiêm phòng”, “Phẫu thuật”)
+  - theo `openNow` (tuỳ chọn nếu chuẩn hoá working hours)
+  - theo `ratingMin` (tuỳ chọn)
+- **Trạng thái clinic**:
+  - `active` hiển thị public
+  - `draft/suspended` không hiển thị (trừ staff/admin)
+- **Rating/reviewCount**:
+  - backend nên tính `rating` từ reviews (avg) + `reviewCount` (count) để không sai lệch
+  - dữ liệu seed ban đầu có thể set theo JSON mẫu, sau đó dần chuyển sang computed
+
+### 5.4 Appointments (Booking)
+
+Đây là module quan trọng nhất, cần làm “vững”.
+
+- **Create appointment**
+  - input: petId, clinicId, dateTime, notes
+  - validate: pet thuộc owner, clinic active, dateTime hợp lệ theo working hours
+  - anti double-booking (transaction/unique constraint/locking)
+- **View appointments**
+  - customer: upcoming/past của mình
+  - clinic_staff: theo clinic, filter ngày/trạng thái
+- **Update appointment status**
+  - confirm / reschedule / cancel / complete / no_show
+  - lưu cancel_reason, audit log
+- **Reminders**
+  - nhắc lịch trước X giờ (notification, optional email/push)
+
+#### Trạng thái & transition (Appointments)
+
+Đề xuất state machine rõ ràng:
+- `pending` → (staff/admin) `confirmed` hoặc (customer/staff) `cancelled`
+- `confirmed` → (staff) `completed` hoặc (customer/staff) `cancelled` hoặc (staff) `reschedule` (thay `date_time`)
+- `completed` (kết thúc) → cho phép tạo `clinic_review`
+- `cancelled` (kết thúc)
+- (tuỳ chọn) `no_show` (staff set khi khách không đến)
+
+#### Quy tắc nghiệp vụ “vững” (Appointments)
+
+- **Time rules**:
+  - không cho đặt lịch trong quá khứ
+  - không cho đặt lịch quá xa tương lai (vd > 90 ngày) (tuỳ business)
+  - làm tròn slot theo bước (vd 15/30 phút) nếu muốn quản lý slot
+- **Working hours**:
+  - nếu chỉ có `open_hours_text` (vd “08:00 - 20:00”) thì giai đoạn 1 chỉ validate cơ bản
+  - giai đoạn 2 dùng bảng `clinic_working_hours` để validate chính xác theo thứ
+- **Anti double-booking**:
+  - cách đơn giản: unique(`clinic_id`, `date_time`) nếu slot fixed
+  - cách tốt hơn: transaction + kiểm tra overlap theo “duration” (nếu có)
+- **Authorization**:
+  - customer chỉ được xem/sửa/cancel appointment của pet thuộc user đó
+  - staff chỉ xử lý appointment thuộc clinic mình
+  - admin có quyền toàn hệ thống
+- **Audit**:
+  - log mọi thay đổi `status` và thay đổi `date_time`
+
+### 5.5 Notifications
+
+- In-app notifications: list, mark read, mark all
+- Triggers: appointment created/confirmed/cancelled; vaccine due; promo published
+- Optional push FCM
+
+#### Quy tắc nghiệp vụ (Notifications)
+
+- **In-app** là bắt buộc: mọi notification đều lưu DB để hiển thị lại.
+- **Idempotent**: job reminder không tạo trùng (vd unique theo `user_id + type + entity_id + scheduled_date`).
+
+### 5.6 Settings
+
+- Lưu các toggle cấu hình người dùng (thông báo in-app/email/push, marketing opt-in)
+
+#### Quy tắc nghiệp vụ (Settings)
+
+- Mỗi user 1 row settings (upsert).
+- Những toggle ảnh hưởng trực tiếp đến job reminders/push/email.
+
+### 5.7 FAQ / Content / Support (tuỳ giai đoạn)
+
+- FAQ public + admin CRUD
+- Articles/promotions public + admin CRUD + publish schedule (optional)
+- Contact/support ticket (optional)
+
+#### Quy tắc nghiệp vụ (Content)
+
+- `slug` duy nhất cho articles để SEO-friendly.
+- Publish window cho promotions (start/end).
+
+---
+
+## 6) API design (REST conventions)
+
+### 6.1 Base conventions
+
+- Base URL: `/api/v1`
+- Auth header: `Authorization: Bearer <access_token>`
+- Pagination: `?page=1&pageSize=20` (hoặc `?cursor=...`)
+- Filtering: query params rõ ràng, không nhét logic vào body của GET
+- Error format chuẩn (1 kiểu duy nhất):
+  - `code` (string), `message` (string), `details` (optional), `requestId` (optional)
+
+### 6.2 Endpoint list (tối thiểu để triển khai)
+
+Auth
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/refresh`
+- `POST /auth/logout`
+- `GET /me`
+- `PATCH /me`
+- `PATCH /me/password`
+
+Pets
+- `GET /pets`
+- `POST /pets`
+- `GET /pets/:id`
+- `PATCH /pets/:id`
+- `DELETE /pets/:id`
+
+Vaccinations
+- `GET /pets/:petId/vaccinations`
+- `POST /pets/:petId/vaccinations`
+- `PATCH /vaccinations/:id`
+- `DELETE /vaccinations/:id`
+
+Clinics (public)
+- `GET /clinics`
+- `GET /clinics/:id`
+- `GET /clinics/:id/services`
+
+Clinic management (staff/admin)
+- `PATCH /clinics/:id`
+- `POST /clinics/:id/services`
+- `DELETE /clinics/:id/services/:serviceId`
+- `GET /clinics/:id/working-hours`
+- `PUT /clinics/:id/working-hours`
+
+Appointments
+- `POST /appointments`
+- `GET /appointments` (customer scope)
+- `GET /clinics/:clinicId/appointments` (staff scope)
+- `PATCH /appointments/:id/status` (confirm/reschedule/cancel/complete)
+
+Notifications
+- `GET /notifications`
+- `POST /notifications/mark-all-read`
+- `POST /notifications/:id/read`
+
+FAQ/Content (optional)
+- `GET /faq`
+- `GET /articles`
+- `GET /articles/:slug`
+- `GET /promotions`
+
+Admin (tối thiểu)
+- `GET /admin/users`
+- `PATCH /admin/users/:id/status`
+- `PUT /admin/users/:id/roles`
+
+### 6.3 Payload examples (để code backend không hiểu nhầm)
+
+Auth
+- `POST /auth/register`
+  - body:
+    - `fullName`, `email`, `phone`, `password`
+- `POST /auth/login`
+  - body:
+    - `email`, `password`
+  - response:
+    - `accessToken`, `refreshToken`, `user`
+
+Pets
+- `POST /pets`
+  - body:
+    - `name`, `species`, `breed`, `gender`, `birthDate`, `weight`, `description?`, `avatarKey?`
+- `PATCH /pets/:id`
+  - body: các field update (partial)
+
+Appointments
+- `POST /appointments`
+  - body:
+    - `petId`, `clinicId`, `dateTime`, `notes?`
+- `PATCH /appointments/:id/status`
+  - body:
+    - `action`: `confirm|cancel|reschedule|complete|no_show`
+    - `dateTime?` (bắt buộc nếu `reschedule`)
+    - `reason?` (khuyến nghị nếu `cancel`)
+
+---
+
+## 7) Security & vận hành (để backend “vững”)
+
+- **Password**: bcrypt/argon2, policy tối thiểu, không log password
+- **JWT**: access short-lived + refresh token rotation, revoke list
+- **RBAC**: chặn truy cập theo role, kiểm tra ownership (pet/appointment)
+- **Rate limit**: login/register, reset password, contact
+- **CORS**: allowlist domain website
+- **Helmet**: security headers
+- **Input validation**: Zod cho body/query/params
+- **Database**: migration bắt buộc qua Prisma, không sửa tay production
+- **Audit log**: ghi hành động quan trọng (appointment status change, role changes)
+- **Observability**: requestId, structured logging (Pino)
+
+### 7.1 Ownership checks (bám sát domain)
+
+- `Pet.owner_id === currentUser.id` với mọi API pet/vaccination.
+- Appointment ownership:
+  - customer: appointment.pet.owner_id === currentUser.id
+  - clinic staff: appointment.clinic_id thuộc clinic staff được gán
+
+### 7.2 Chống abuse (thực tế)
+
+- Rate limit login/register theo IP + theo identifier (email).
+- Lock tạm thời sau N lần login fail (optional).
+
+---
+
+## 8) Jobs/Cron (optional nhưng rất hữu ích)
+
+- Vaccine due reminders (daily)
+- Appointment reminders (hourly)
+- Cleanup revoked tokens (daily)
+
+### 8.1 Danh sách job gợi ý theo dự án
+
+- `VACCINE_REMINDER_DAILY`: tìm vaccination có `next_due_date` sắp đến → tạo notification.
+- `APPOINTMENT_REMINDER_HOURLY`: nhắc lịch trước 24h/2h.
+- `PROMOTION_PUBLISHER`: tự publish/unpublish theo start/end.
+
+---
+
+## 9) Seed & dữ liệu ban đầu
+
+- Seed roles: customer/clinic_staff/admin
+- Seed clinics/services (nếu có dữ liệu mẫu)
+- Seed FAQ/articles/promotions (optional)
+
+---
+
+## 10) Cấu hình môi trường (ENV) – gợi ý
+
+- `NODE_ENV=development|production`
+- `PORT=4000`
+- `DATABASE_URL=postgresql://...`
+- `JWT_ACCESS_SECRET=...`
+- `JWT_REFRESH_SECRET=...`
+- `JWT_ACCESS_TTL=15m`
+- `JWT_REFRESH_TTL=30d`
+- `CORS_ORIGIN=https://your-website-domain`
+- `CLOUDINARY_CLOUD_NAME=...` *(optional)*
+- `CLOUDINARY_API_KEY=...` *(optional)*
+- `CLOUDINARY_API_SECRET=...` *(optional)*
+- `FCM_SERVER_KEY=...` *(optional)*
+
+---
+
+## 11) Project structure (gợi ý để code sạch)
+
+- `src/server.ts` (bootstrap)
+- `src/app.ts` (express app, middlewares)
+- `src/routes/*` (route modules)
+- `src/controllers/*`
+- `src/services/*` (business logic)
+- `src/repositories/*` (DB queries qua Prisma)
+- `src/middlewares/*` (auth, rbac, rate-limit, error handler)
+- `src/validators/*` (zod schemas)
+- `src/utils/*` (logger, jwt, date)
+- `prisma/schema.prisma`
+- `prisma/migrations/*`
+- `prisma/seed.ts`
+
+---
+
+## 12) Definition of Done (backend “vững” – tối thiểu)
+
+- Có migration + seed chạy được 1 lệnh
+- Auth + RBAC hoạt động, có refresh token rotation
+- CRUD pets + vaccinations hoạt động theo ownership
+- Clinic list/search/detail hoạt động + staff cập nhật working hours/services
+- Booking appointment có anti double-booking + status flow
+- Notifications in-app + mark read
+- Swagger docs có thể truy cập
+- Logging + error format thống nhất
+
+---
+
+## 14) Tình trạng triển khai (As-Implemented trong repo này)
+
+Phần này **đối chiếu spec** với code hiện tại trong thư mục backend.
+
+### 14.1 Tech stack thực tế
+
+- **Runtime**: Node.js
+- **Ngôn ngữ**: TypeScript
+- **Framework**: Express
+- **DB**: PostgreSQL
+- **ORM/Migrate/Seed**: Prisma
+- **Auth**: JWT access token + refresh token (rotation + revoke)
+- **Validation**: Zod
+- **Security/ops**: Helmet, CORS, Rate limit, requestId, Pino logging
+- **Docs**: Swagger UI đã mount ở `/api/v1/docs` (hiện mới là khung, chưa annotate endpoint chi tiết)
+
+### 14.2 Danh sách chức năng đã làm (API chạy thật)
+
+Base: `/api/v1`
+
+**Auth**
+- `POST /auth/register`
+- `POST /auth/login`
+- `POST /auth/refresh` (refresh token rotation)
+- `POST /auth/logout` (revoke refresh token)
+
+**Me**
+- `GET /me`
+- `PATCH /me`
+- `PATCH /me/password` (đổi mật khẩu sẽ revoke refresh tokens)
+
+**Pets (ownership)**
+- `GET /pets` (admin có thể truyền `ownerId` để xem theo user khác)
+- `POST /pets`
+- `GET /pets/:id`
+- `PATCH /pets/:id`
+- `DELETE /pets/:id`
+
+**Vaccinations (ownership)**
+- `GET /pets/:petId/vaccinations`
+- `POST /pets/:petId/vaccinations`
+- `PATCH /vaccinations/:id`
+- `DELETE /vaccinations/:id`
+
+**Clinics (public)**
+- `GET /clinics` (pagination + search theo name/address/services)
+- `GET /clinics/:id`
+- `GET /clinics/:id/services`
+
+**Clinic management (staff/admin)**
+- `PATCH /clinics/:id`
+- `POST /clinics/:id/services`
+- `DELETE /clinics/:id/services/:serviceId`
+- `GET /clinics/:id/working-hours`
+- `PUT /clinics/:id/working-hours`
+- `GET /clinics/:id/appointments` (staff scope)
+
+**Appointments**
+- `POST /appointments` (anti double-booking theo unique `(clinic_id, date_time)`)
+- `GET /appointments` (customer scope, filter `upcoming|past`)
+- `PATCH /appointments/:id/status` (confirm|cancel|reschedule|complete|no_show)
+
+**Notifications (in-app)**
+- `GET /notifications` (pagination)
+- `POST /notifications/mark-all-read`
+- `POST /notifications/:id/read`
+
+**Admin**
+- `GET /admin/users` (pagination + search)
+- `PATCH /admin/users/:id/status` (lock/unlock)
+- `PUT /admin/users/:id/roles`
+
+### 14.3 Checklist nghiệp vụ cơ bản (đã/ chưa đáp ứng)
+
+**Auth & User**
+- ✅ Register: hash password + unique email/phone
+- ✅ Login: chặn user `locked`
+- ✅ Refresh token: có rotation + lưu `token_hash` + revoke old
+- ✅ Logout: revoke refresh token
+- ✅ Change password: revoke tất cả refresh token
+- ⚠️ Login fail throttling/lock after N fails: chưa làm (mới có rate limit endpoint)
+- ⚠️ Forgot/Reset password: chưa expose API (DB table có sẵn)
+
+**RBAC**
+- ✅ Roles: `customer`, `clinic_staff`, `admin`
+- ✅ Middleware `requireAuth`, `requireRole`
+- ✅ Admin endpoints bắt buộc role `admin`
+
+**Ownership**
+- ✅ Pet/Vaccination: chỉ owner (hoặc admin) được CRUD
+- ✅ Appointment access:
+  - customer: theo owner của pet
+  - clinic_staff: chỉ appointment thuộc clinic mà user được gán trong `clinic_staff`
+  - admin: toàn hệ thống
+
+**Clinics**
+- ✅ Public list/search/detail
+- ✅ Staff/Admin: manage services + working hours + update clinic
+- ⚠️ `status` clinic (draft/suspended) chỉ enforced ở public list/detail (chỉ show `active`)
+- ⚠️ Facility/gallery/reviews: DB có, API chưa expose
+
+**Appointments (Booking)**
+- ✅ Không cho đặt lịch quá khứ
+- ✅ Validate clinic `active`
+- ✅ Validate working hours (nếu clinic có cấu hình `clinic_working_hours`; nếu chưa có thì bỏ qua để phase 1)
+- ✅ Anti double-booking: unique `(clinic_id, date_time)`
+- ✅ Status transitions: pending/confirmed/completed/cancelled/no_show (reschedule giữ `confirmed`)
+- ✅ Audit log cho các action status + notification trigger cho customer
+- ⚠️ Rule “slot rounding / max future days”: chưa làm
+- ⚠️ Duration/overlap booking: chưa làm (hiện là slot exact datetime)
+
+**Notifications**
+- ✅ In-app notifications lưu DB
+- ✅ Mark read / mark all read
+- ⚠️ Idempotent reminder jobs: chưa làm (chưa có cron)
+
+**Observability & error format**
+- ✅ `requestId` (`x-request-id`)
+- ✅ Error format thống nhất `code/message/details/requestId`
+- ✅ JSON parse lỗi trả 400 `Invalid JSON body`
+
+### 14.4 Những phần có trong DB nhưng chưa expose API (để làm tiếp)
+
+- `pet_weight_records`
+- `clinic_facilities`, `clinic_gallery_images`
+- `clinic_reviews` (kèm rule “chỉ review khi appointment completed” — chưa implement)
+- `faq_items`, `content_articles`, `promotions`, `support_tickets`
+- `file_assets`
+- `password_reset_tokens` flow
+
+
+## 13) Tính năng đề xuất thêm (không AI) – tăng hấp dẫn & dễ monetization
+
+Những tính năng dưới đây đều “ăn khớp” với domain thú cưng/phòng khám và làm được chủ yếu từ backend:
+
+- **Favorites (Yêu thích phòng khám)**: user lưu clinic yêu thích → tăng retention.
+- **Lịch sử đặt lịch + tái đặt lịch 1 chạm**: clone appointment cũ (pet+clinic+service) để đặt lại.
+- **Waitlist (Danh sách chờ)**: nếu slot kín, user đăng ký chờ; khi có slot trống → notify.
+- **Gói dịch vụ định kỳ (Subscriptions)**:
+  - gói “khám tổng quát theo quý”, “vaccine theo năm”
+  - backend quản lý chu kỳ + nhắc lịch + trạng thái gói
+- **Referral (Giới thiệu bạn bè)**: mã giới thiệu, thưởng voucher; backend quản lý mã/điều kiện.
+- **Voucher/Coupon**:
+  - promo code theo %/fixed amount
+  - điều kiện áp dụng theo clinic/service/time window
+  - áp vào appointment (future feature)
+- **Clinic analytics (cho staff/admin)**:
+  - thống kê số lịch hẹn theo ngày/trạng thái
+  - tỷ lệ hủy/no-show
+  - top services (nếu chuẩn hoá service)
+- **Giờ cao điểm & gợi ý slot**:
+  - backend tính slot “ít đông” dựa trên lịch sử appointment
+- **Xác minh phòng khám (Verified badge)**:
+  - upload giấy tờ (file_assets) + admin approve
+- **Multi-pet household**:
+  - 1 user nhiều pet đã có; mở rộng: chia sẻ pet cho thành viên gia đình (ACL) (optional)
+- **Nhắc lịch xuất/đính kèm Calendar**:
+  - endpoint generate `.ics` cho appointment để user add Google/Apple Calendar
+- **Báo cáo sự cố (Report clinic/review)**:
+  - user report, admin xử lý moderation

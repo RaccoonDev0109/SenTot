@@ -1,0 +1,447 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  active
+  locked
+}
+
+enum PetSpecies {
+  dog
+  cat
+  bird
+  rabbit
+  other
+}
+
+enum PetGender {
+  male
+  female
+}
+
+enum VaccinationStatus {
+  completed
+  upcoming
+  overdue
+}
+
+enum ClinicStatus {
+  draft
+  active
+  suspended
+}
+
+enum AppointmentStatus {
+  pending
+  confirmed
+  completed
+  cancelled
+  no_show
+}
+
+enum ReviewStatus {
+  visible
+  hidden
+}
+
+enum SupportTicketStatus {
+  open
+  in_progress
+  resolved
+  closed
+}
+
+model User {
+  id           String     @id @default(uuid())
+  fullName     String     @map("full_name")
+  email        String     @unique
+  phone        String     @unique
+  avatarUrl    String?    @map("avatar_url")
+  passwordHash String     @map("password_hash")
+  status       UserStatus @default(active)
+  createdAt    DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  pets          Pet[]
+  roles         UserRole[]
+  refreshTokens RefreshToken[]
+  resetTokens   PasswordResetToken[]
+  notifications Notification[]
+  settings      UserSetting?
+  clinicStaff   ClinicStaff[]
+  appointmentsReviewed ClinicReview[]
+  supportTickets SupportTicket[]
+  fileAssets    FileAsset[] @relation("FileAssetsOwner")
+  auditLogs     AuditLog[]  @relation("AuditActor")
+
+  @@map("users")
+}
+
+model Role {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users UserRole[]
+
+  @@map("roles")
+}
+
+model UserRole {
+  userId String @map("user_id")
+  roleId String @map("role_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  tokenHash String   @map("token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  tokenHash String   @map("token_hash")
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model Pet {
+  id          String     @id @default(uuid())
+  ownerId     String     @map("owner_id")
+  name        String
+  species     PetSpecies
+  breed       String
+  gender      PetGender
+  birthDate   DateTime   @map("birth_date") @db.Date
+  weightKg    Decimal    @map("weight_kg") @db.Decimal(5, 2)
+  avatarKey   String?    @map("avatar_key")
+  description String?
+  createdAt   DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  owner         User              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  vaccinations  Vaccination[]
+  weightRecords PetWeightRecord[]
+  appointments  Appointment[]
+
+  @@index([ownerId])
+  @@map("pets")
+}
+
+model PetWeightRecord {
+  id         String   @id @default(uuid())
+  petId      String   @map("pet_id")
+  weightKg   Decimal  @map("weight_kg") @db.Decimal(5, 2)
+  measuredAt DateTime @map("measured_at") @db.Timestamptz(6)
+  note       String?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  pet Pet @relation(fields: [petId], references: [id], onDelete: Cascade)
+
+  @@index([petId, measuredAt])
+  @@map("pet_weight_records")
+}
+
+model Vaccination {
+  id          String            @id @default(uuid())
+  petId       String            @map("pet_id")
+  vaccineName String            @map("vaccine_name")
+  date        DateTime          @db.Date
+  nextDueDate DateTime          @map("next_due_date") @db.Date
+  status      VaccinationStatus
+  notes       String?
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  pet Pet @relation(fields: [petId], references: [id], onDelete: Cascade)
+
+  @@index([petId])
+  @@index([nextDueDate])
+  @@map("vaccinations")
+}
+
+model Clinic {
+  id            String      @id @default(uuid())
+  name          String
+  address       String
+  phone         String
+  description   String
+  rating        Decimal     @default(0) @db.Decimal(2, 1)
+  reviewCount   Int         @default(0) @map("review_count")
+  openHoursText String      @map("open_hours_text")
+  coverImageUrl String?     @map("cover_image_url")
+  latitude      Decimal?    @db.Decimal(9, 6)
+  longitude     Decimal?    @db.Decimal(9, 6)
+  status        ClinicStatus @default(active)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  services     ClinicService[]
+  facilities   ClinicFacility[]
+  galleryImages ClinicGalleryImage[]
+  workingHours ClinicWorkingHour[]
+  staff        ClinicStaff[]
+  appointments Appointment[]
+  reviews      ClinicReview[]
+
+  @@index([name])
+  @@map("clinics")
+}
+
+model ClinicService {
+  id       String   @id @default(uuid())
+  clinicId String   @map("clinic_id")
+  name     String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@unique([clinicId, name])
+  @@index([clinicId])
+  @@map("clinic_services")
+}
+
+model ClinicFacility {
+  id        String   @id @default(uuid())
+  clinicId  String   @map("clinic_id")
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId])
+  @@map("clinic_facilities")
+}
+
+model ClinicGalleryImage {
+  id        String   @id @default(uuid())
+  clinicId  String   @map("clinic_id")
+  imageUrl  String   @map("image_url")
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId])
+  @@map("clinic_gallery_images")
+}
+
+model ClinicWorkingHour {
+  id        String   @id @default(uuid())
+  clinicId  String   @map("clinic_id")
+  dayOfWeek Int      @map("day_of_week")
+  openTime  DateTime? @map("open_time") @db.Time(6)
+  closeTime DateTime? @map("close_time") @db.Time(6)
+  isClosed  Boolean  @default(false) @map("is_closed")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId])
+  @@map("clinic_working_hours")
+}
+
+model ClinicStaff {
+  clinicId String @map("clinic_id")
+  userId   String @map("user_id")
+  title    String?
+
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([clinicId, userId])
+  @@map("clinic_staff")
+}
+
+model Appointment {
+  id          String            @id @default(uuid())
+  petId       String            @map("pet_id")
+  clinicId    String            @map("clinic_id")
+  dateTime    DateTime          @map("date_time") @db.Timestamptz(6)
+  status      AppointmentStatus @default(pending)
+  notes       String?
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  cancelReason String?          @map("cancel_reason")
+  cancelledAt DateTime?         @map("cancelled_at") @db.Timestamptz(6)
+
+  pet    Pet    @relation(fields: [petId], references: [id], onDelete: Cascade)
+  clinic Clinic @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  reviews ClinicReview[]
+
+  @@unique([clinicId, dateTime])
+  @@index([petId])
+  @@index([clinicId])
+  @@index([dateTime])
+  @@index([status])
+  @@map("appointments")
+}
+
+model ClinicReview {
+  id            String      @id @default(uuid())
+  clinicId      String      @map("clinic_id")
+  userId        String      @map("user_id")
+  appointmentId String?     @map("appointment_id")
+  rating        Int
+  comment       String?
+  status        ReviewStatus @default(visible)
+  createdAt     DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  clinic      Clinic      @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  appointment Appointment? @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
+
+  @@index([clinicId])
+  @@index([userId])
+  @@map("clinic_reviews")
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  title     String
+  body      String
+  type      String
+  data      Json?
+  readAt    DateTime? @map("read_at") @db.Timestamptz(6)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model UserSetting {
+  userId        String   @id @map("user_id")
+  notifyInApp   Boolean  @default(true) @map("notify_in_app")
+  notifyEmail   Boolean  @default(false) @map("notify_email")
+  notifyPush    Boolean  @default(false) @map("notify_push")
+  marketingOptIn Boolean @default(false) @map("marketing_opt_in")
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+model FaqItem {
+  id          String   @id @default(uuid())
+  question    String
+  answer      String
+  sortOrder   Int      @default(0) @map("sort_order")
+  isPublished Boolean  @default(true) @map("is_published")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("faq_items")
+}
+
+model SupportTicket {
+  id        String             @id @default(uuid())
+  userId    String?            @map("user_id")
+  name      String?
+  email     String?
+  subject   String
+  message   String
+  status    SupportTicketStatus @default(open)
+  createdAt DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@map("support_tickets")
+}
+
+model ContentArticle {
+  id            String   @id @default(uuid())
+  title         String
+  slug          String   @unique
+  excerpt       String?
+  content       String
+  coverImageUrl String?  @map("cover_image_url")
+  isPublished   Boolean  @default(false) @map("is_published")
+  publishedAt   DateTime? @map("published_at") @db.Timestamptz(6)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("content_articles")
+}
+
+model Promotion {
+  id            String   @id @default(uuid())
+  title         String
+  description   String
+  coverImageUrl String?  @map("cover_image_url")
+  startAt       DateTime? @map("start_at") @db.Timestamptz(6)
+  endAt         DateTime? @map("end_at") @db.Timestamptz(6)
+  isPublished   Boolean  @default(false) @map("is_published")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("promotions")
+}
+
+model FileAsset {
+  id          String   @id @default(uuid())
+  ownerUserId String?  @map("owner_user_id")
+  provider    String
+  publicId    String   @map("public_id")
+  url         String
+  resourceType String  @map("resource_type")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  ownerUser User? @relation("FileAssetsOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([ownerUserId])
+  @@map("file_assets")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?  @map("actor_user_id")
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  actorUser User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId])
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
+
